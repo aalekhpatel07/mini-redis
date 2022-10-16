@@ -6,6 +6,8 @@
 //!
 //! The `clap` crate is used for parsing arguments.
 
+use std::path::PathBuf;
+
 use mini_redis::{server, DEFAULT_PORT};
 
 use clap::Parser;
@@ -27,6 +29,9 @@ use opentelemetry_aws::trace::XrayPropagator;
 use tracing_subscriber::{
     fmt, layer::SubscriberExt, util::SubscriberInitExt, util::TryInitError, EnvFilter,
 };
+use draft_server::{load_from_file, RaftRuntime};
+use draft_state_machine::RaftChannels;
+
 
 #[tokio::main]
 pub async fn main() -> mini_redis::Result<()> {
@@ -34,11 +39,26 @@ pub async fn main() -> mini_redis::Result<()> {
 
     let cli = Cli::parse();
     let port = cli.port.unwrap_or(DEFAULT_PORT);
-
+    let raft_config = load_from_file(cli.raft_config)?;
     // Bind a TCP listener
     let listener = TcpListener::bind(&format!("127.0.0.1:{}", port)).await?;
 
-    server::run(listener, signal::ctrl_c()).await;
+    let (tx1, rx1) = tokio::sync::mpsc::unbounded_channel();
+    let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel();
+
+    let raft_channels = RaftChannels {
+        rx: rx1,
+    };
+
+    let raft_runtime = RaftRuntime::new(raft_config, raft_channels);
+
+    server::run(
+        listener, 
+        raft_runtime,
+        tx1,
+        rx2,
+        signal::ctrl_c()
+    ).await;
 
     Ok(())
 }
@@ -48,6 +68,9 @@ pub async fn main() -> mini_redis::Result<()> {
 struct Cli {
     #[clap(long)]
     port: Option<u16>,
+
+    #[clap(long)]
+    raft_config: PathBuf,
 }
 
 #[cfg(not(feature = "otel"))]

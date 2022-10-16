@@ -39,6 +39,13 @@ tracing-opentelemetry = { version = "0.17.2", optional = true }
 opentelemetry-aws = { version = "0.5.0", optional = true }
 # Allows you to send data to the OTel collector
 opentelemetry-otlp = { version = "0.10.0", optional = true }
+draft-server = { version = "*", path = "../../draft-server" }
+draft-state-machine = { version = "*", path = "../../draft-state-machine" }
+async-trait = "0.1.57"
+thiserror = "1.0.37"
+serde = { version = "1.0.145", features = ["serde_derive"] }
+uuid = { version = "1.2.1", features = ["fast-rng", "v4"] }
+serde_json = "1.0.86"
 
 [dev-dependencies]
 # Enable test-utilities in dev mode only. This is mostly for tests.

@@ -5,6 +5,7 @@ mod publish;
 pub use publish::Publish;
 
 mod set;
+use serde::{Serialize, Serializer};
 pub use set::Set;
 
 mod subscribe;
@@ -21,7 +22,7 @@ use crate::{Connection, Db, Frame, Parse, ParseError, Shutdown};
 /// Enumeration of supported Redis commands.
 ///
 /// Methods called on `Command` are delegated to the command implementation.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Command {
     Get(Get),
     Publish(Publish),
@@ -83,6 +84,20 @@ impl Command {
         Ok(command)
     }
 
+    pub fn into_frame(&self) -> Frame {
+        use Command::*;
+
+        match self {
+            Get(cmd) => cmd.clone().into_frame(),
+            Set(cmd) => cmd.clone().into_frame(),
+            Publish(cmd) => cmd.clone().into_frame(),
+            Subscribe(cmd) => cmd.clone().into_frame(),
+            Unsubscribe(cmd) => cmd.clone().into_frame(),
+            Ping(cmd) => cmd.clone().into_frame(),
+            _ => unreachable!("Should be a known command.")
+        }
+    }
+
     /// Apply the command to the specified `Db` instance.
     ///
     /// The response is written to `dst`. This is called by the server in order
@@ -120,4 +135,5 @@ impl Command {
             Command::Unknown(cmd) => cmd.get_name(),
         }
     }
+
 }

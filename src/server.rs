@@ -7,10 +7,15 @@ use crate::{Command, Connection, Db, DbDropGuard, Shutdown};
 
 use std::future::Future;
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
+use draft_server::{RaftRuntime, BufferBackend};
+use draft_state_machine::{RaftChannels, IncomingMessage, OutgoingMessage};
+use serde::Serialize;
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver};
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::time::{self, Duration};
 use tracing::{debug, error, info, instrument};
+use uuid::Uuid;
 
 /// Server listener state. Created in the `run` call. It includes a `run` method
 /// which performs the TCP listening and initialization of per-connection state.
@@ -62,6 +67,8 @@ struct Listener {
     /// is safe to exit the server process.
     shutdown_complete_rx: mpsc::Receiver<()>,
     shutdown_complete_tx: mpsc::Sender<()>,
+
+    raft_incoming_tx: mpsc::UnboundedSender<(mpsc::UnboundedSender<OutgoingMessage>, IncomingMessage)>,
 }
 
 /// Per-connection handler. Reads requests from `connection` and applies the
@@ -96,6 +103,8 @@ struct Handler {
 
     /// Not used directly. Instead, when `Handler` is dropped...?
     _shutdown_complete: mpsc::Sender<()>,
+
+    raft_replication_tx: mpsc::UnboundedSender<(mpsc::UnboundedSender<OutgoingMessage>, IncomingMessage)>
 }
 
 /// Maximum number of concurrent connections the redis server will accept.
@@ -121,7 +130,13 @@ const MAX_CONNECTIONS: usize = 250;
 ///
 /// `tokio::signal::ctrl_c()` can be used as the `shutdown` argument. This will
 /// listen for a SIGINT signal.
-pub async fn run(listener: TcpListener, shutdown: impl Future) {
+pub async fn run(
+    listener: TcpListener, 
+    raft_runtime: RaftRuntime, 
+    tx1: UnboundedSender<(UnboundedSender<OutgoingMessage>, IncomingMessage)>,
+    mut rx2: UnboundedReceiver<OutgoingMessage>,
+    shutdown: impl Future
+) {
     // When the provided `shutdown` future completes, we must send a shutdown
     // message to all active connections. We use a broadcast channel for this
     // purpose. The call below ignores the receiver of the broadcast pair, and when
@@ -138,7 +153,26 @@ pub async fn run(listener: TcpListener, shutdown: impl Future) {
         notify_shutdown,
         shutdown_complete_tx,
         shutdown_complete_rx,
+        raft_incoming_tx: tx1,
     };
+
+
+    tokio::spawn(async move {
+        while let Some(msg) = rx2.recv().await {
+            match msg {
+                OutgoingMessage::CommandApplied((cmd_id, data)) => {
+                    println!("Command {cmd_id:#?} applied to state successfully.");
+                    println!("Response {data:#?}");
+                },
+                OutgoingMessage::FailedToApplyCommand((cmd_id, data)) => {
+
+                },
+                OutgoingMessage::RaftError((cmd_id, data)) => {
+
+                }
+            }
+        }
+    });
 
     // Concurrently run the server and listen for the `shutdown` signal. The
     // server task runs until an error is encountered, so under normal
@@ -170,7 +204,12 @@ pub async fn run(listener: TcpListener, shutdown: impl Future) {
             if let Err(err) = res {
                 error!(cause = %err, "failed to accept");
             }
-        }
+        },
+        res = raft_runtime.run() => {
+            if let Err(err) = res {
+                error!(cause = %err, "failed to setup raft runtime.");
+            }
+        },
         _ = shutdown => {
             // The shutdown signal has been received.
             info!("shutting down");
@@ -255,6 +294,7 @@ impl Listener {
                 // Notifies the receiver half once all clones are
                 // dropped.
                 _shutdown_complete: self.shutdown_complete_tx.clone(),
+                raft_replication_tx: self.raft_incoming_tx.clone()
             };
 
             // Spawn a new task to process the connections. Tokio tasks are like
@@ -359,13 +399,27 @@ impl Handler {
 
             // Perform the work needed to apply the command. This may mutate the
             // database state as a result.
-            //
+            
+            // Send the cmd to our raft runtime.
+
             // The connection is passed into the apply function which allows the
             // command to write response frames directly to the connection. In
             // the case of pub/sub, multiple frames may be send back to the
             // peer.
-            cmd.apply(&self.db, &mut self.connection, &mut self.shutdown)
+            
+            let serialized = serde_json::to_vec(&cmd.into_frame())?;
+            let cmd_id = Uuid::new_v4();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            self.raft_replication_tx.send((tx, IncomingMessage::ApplyCommand((cmd_id, bytes::Bytes::from(serialized)))))?;
+            
+            if let Some(msg) = rx.recv().await {
+                cmd.apply(
+                    &self.db, 
+                    &mut self.connection, 
+                    &mut self.shutdown
+                )
                 .await?;
+            }
         }
 
         Ok(())

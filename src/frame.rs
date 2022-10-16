@@ -7,9 +7,10 @@ use std::fmt;
 use std::io::Cursor;
 use std::num::TryFromIntError;
 use std::string::FromUtf8Error;
+use serde::{Serialize, Deserialize};
 
 /// A frame in the Redis protocol.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Frame {
     Simple(String),
     Error(String),
